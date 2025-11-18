@@ -182,7 +182,7 @@ try:
             dt = max(1e-3, now - last_time)    # 제어 dt
             last_time = now
 
-            # 상태 전이(유효성 기반)
+            # 상태 전이
             if raw_left is not None and raw_right is not None:
                 last_valid_ts = now
                 valid = True
@@ -194,7 +194,7 @@ try:
             elif valid:
                 state = 'TRACKING'
 
-            # 2) 응급 회피 우선(매우 근접시 강제 조향)
+            # 2) 응급 회피
             if left is not None and left <= EMERGENCY_CM:
                 set_servo_angle(120)           
                 target_speed = SPEED_MIN       # 감속

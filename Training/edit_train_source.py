@@ -142,10 +142,6 @@ with tf.Session(config=cfg) as sess:
     converter.experimental_new_converter = False
     converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]
 
-    # (선택) 양자화 기본 옵션 – 우선 OFF로 두고, 성공 확인 후 켜자
-    # from tensorflow.lite import Optimize
-    # converter.optimizations = [Optimize.DEFAULT]
-    # INT8로 완전 양자화하려면 representative_dataset 설정이 필요함
 
     tflite_model = converter.convert()
     with open(tflite_abs, "wb") as f:
