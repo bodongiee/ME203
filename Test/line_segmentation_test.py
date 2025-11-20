@@ -56,7 +56,7 @@ servo_pwm.start(0)
 
 # ---------------- PID Controller ----------------
 class PIDController:
-    def __init__(self, kp=0.46, ki=0.0, kd=0.2):
+    def __init__(self, kp=1.8, ki=0.02, kd=1.0):
         self.kp = kp
         self.ki = ki
         self.kd = kd
@@ -144,9 +144,9 @@ def analyze_line_mask(mask):
     """
     height, width = mask.shape
 
-    # ROI 설정: 화면 하단 60%만 사용 (카메라가 낮으므로)
-    roi_start = int(height * 0.4)
-    roi_mask = mask[roi_start:, :]
+    # ROI 설정: 화면 전체 사용
+    roi_start = 0
+    roi_mask = mask
 
     # 라인 픽셀 수 확인
     line_pixels = np.sum(roi_mask > 0)
@@ -191,16 +191,7 @@ def analyze_line_mask(mask):
     return True, line_center_x, line_angle, confidence
 
 def calculate_steering_angle(line_center_x, line_angle, frame_width=IMG_SIZE):
-    """
-    라인 위치와 각도로부터 조향각 계산
 
-    Args:
-        line_center_x: 라인 중심 x 좌표 (0~1 정규화)
-        line_angle: 라인 각도 (도 단위)
-
-    Returns:
-        servo_angle: 서보 모터 각도 (45~135)
-    """
     # 화면 중심에서의 오차 계산
     center_error = (line_center_x - 0.5) * 2  # -1 ~ 1 범위
 

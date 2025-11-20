@@ -10,11 +10,19 @@ from tensorflow.keras import layers
 import cv2
 from sklearn.model_selection import train_test_split
 
+# tensorflow-addons for rotation (optional)
+try:
+    import tensorflow_addons as tfa
+    HAS_TFA = True
+except ImportError:
+    HAS_TFA = False
+    print("Warning: tensorflow-addons not found. Rotation augmentation disabled.")
+
 # ---------------- 설정 ----------------
 IMG_SIZE = 240
-BATCH_SIZE = 16
+BATCH_SIZE = 8  # 작은 데이터셋에는 작은 배치가 더 좋음
 EPOCHS = 50
-LEARNING_RATE = 0.001
+LEARNING_RATE = 0.0001  # 학습률 낮춤 (과적합 방지)
 
 # 데이터 경로
 IMAGES_DIR = "./data/images"  # 원본 이미지
@@ -62,19 +70,36 @@ def load_dataset(images_dir, masks_dir):
     print(f"Loaded {len(images)} image-mask pairs")
     return images, masks
 
-# ---------------- Data Augmentation ----------------
+# ---------------- Data Augmentation (강화) ----------------
 def augment(image, mask):
-    """데이터 증강"""
+    """데이터 증강 (과적합 방지를 위해 강화)"""
     # 랜덤 좌우 반전
     if tf.random.uniform(()) > 0.5:
         image = tf.image.flip_left_right(image)
         mask = tf.image.flip_left_right(mask)
 
-    # 랜덤 밝기 조정
-    image = tf.image.random_brightness(image, 0.2)
+    # 랜덤 밝기 조정 (범위 확대)
+    image = tf.image.random_brightness(image, 0.3)
 
-    # 랜덤 대비 조정
-    image = tf.image.random_contrast(image, 0.8, 1.2)
+    # 랜덤 대비 조정 (범위 확대)
+    image = tf.image.random_contrast(image, 0.7, 1.4)
+
+    # 랜덤 색조 조정 (조명 변화 대응)
+    image = tf.image.random_hue(image, 0.1)
+
+    # 랜덤 채도 조정
+    image = tf.image.random_saturation(image, 0.7, 1.3)
+
+    # 랜덤 회전 (±10도) - tensorflow-addons가 있을 때만
+    if HAS_TFA and tf.random.uniform(()) > 0.5:
+        angle = tf.random.uniform((), -10, 10) * (3.14159 / 180.0)
+        image = tfa.image.rotate(image, angle, interpolation='bilinear')
+        mask = tfa.image.rotate(mask, angle, interpolation='nearest')
+
+    # 랜덤 Gaussian 노이즈 추가 (실제 카메라 노이즈 시뮬레이션)
+    if tf.random.uniform(()) > 0.7:
+        noise = tf.random.normal(shape=tf.shape(image), mean=0.0, stddev=0.02)
+        image = image + noise
 
     # 값 범위 클리핑
     image = tf.clip_by_value(image, 0.0, 1.0)
@@ -94,20 +119,27 @@ def create_dataset(images, masks, batch_size, augment_data=True):
 
     return dataset
 
-# ---------------- 모델 정의 (MobileNetV2 기반 U-Net) ----------------
-def build_unet_mobilenet(input_shape=(IMG_SIZE, IMG_SIZE, 3)):
+# ---------------- 모델 정의 (MobileNetV2 기반 U-Net with Regularization) ----------------
+def build_unet_mobilenet(input_shape=(IMG_SIZE, IMG_SIZE, 3), dropout_rate=0.3):
     """
     MobileNetV2를 인코더로 사용하는 경량 U-Net
-    라즈베리파이에서 실시간 추론 가능
+    과적합 방지를 위해 Dropout 추가
     """
     inputs = layers.Input(shape=input_shape)
 
     # 인코더: MobileNetV2 (pre-trained on ImageNet)
+    # 작은 데이터셋에서는 freeze하는 게 더 나을 수 있음
     base_model = tf.keras.applications.MobileNetV2(
         input_tensor=inputs,
         include_top=False,
         weights='imagenet'
     )
+
+    # MobileNetV2의 일부 레이어만 학습 (Fine-tuning)
+    # 초반 레이어는 freeze (일반적인 특징 추출기)
+    base_model.trainable = True
+    for layer in base_model.layers[:100]:  # 처음 100개 레이어 동결
+        layer.trainable = False
 
     # Skip connections를 위한 레이어 선택
     skip_names = [
@@ -125,7 +157,7 @@ def build_unet_mobilenet(input_shape=(IMG_SIZE, IMG_SIZE, 3)):
     # 디코더
     x = encoder_output
 
-    # Upsampling + Skip connections
+    # Upsampling + Skip connections with dynamic resizing
     for i, skip in reversed(list(enumerate(skip_outputs))):
         # Upsampling
         x = layers.Conv2DTranspose(
@@ -136,12 +168,23 @@ def build_unet_mobilenet(input_shape=(IMG_SIZE, IMG_SIZE, 3)):
             activation='relu'
         )(x)
 
-        # Skip connection
-        x = layers.Concatenate()([x, skip])
+        # Skip connection: resize x to match skip size
+        # MobileNetV2 skip 크기가 예측 불가능하므로 x를 skip에 맞춤
+        x_resized = layers.Resizing(
+            height=skip.shape[1],
+            width=skip.shape[2],
+            interpolation='bilinear'
+        )(x)
 
-        # Convolution
-        x = layers.Conv2D(128 // (2 ** i), 3, padding='same', activation='relu')(x)
-        x = layers.Conv2D(128 // (2 ** i), 3, padding='same', activation='relu')(x)
+        x = layers.Concatenate()([x_resized, skip])
+
+        # Convolution with Dropout (과적합 방지)
+        x = layers.Conv2D(128 // (2 ** i), 3, padding='same', activation='relu',
+                         kernel_regularizer=tf.keras.regularizers.l2(0.0001))(x)
+        x = layers.Dropout(dropout_rate)(x)  # Dropout 추가
+        x = layers.Conv2D(128 // (2 ** i), 3, padding='same', activation='relu',
+                         kernel_regularizer=tf.keras.regularizers.l2(0.0001))(x)
+        x = layers.Dropout(dropout_rate)(x)  # Dropout 추가
 
     # 최종 upsampling (240x240로 복원)
     x = layers.Conv2DTranspose(32, 3, strides=2, padding='same', activation='relu')(x)
