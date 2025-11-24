@@ -79,6 +79,44 @@ class PIDController:
 
 pid_controller = PIDController(kp=1.8, ki=0.02, kd=1.0)
 
+# ---------------- Angle Smoothing ----------------
+from collections import deque
+
+angle_buffer = deque(maxlen=5)  # 최근 5개 각도 저장
+
+def smooth_angle(current_angle, buffer):
+
+    if len(buffer) == 0:
+        buffer.append(current_angle)
+        return current_angle
+
+    # 이전 각도와의 차이 계산
+    prev_angle = buffer[-1]
+    diff = abs(current_angle - prev_angle)
+
+    # 180도 점프 감지 및 보정
+    if diff > 90:  # 큰 각도 차이 = 0°/180° 점프
+        # 0°와 180°는 같은 방향 (수평선)
+        # 더 가까운 쪽으로 통일
+        if current_angle < 90:
+            # 0° 근처 → 180°으로 변환
+            current_angle += 180
+        else:
+            # 180° 근처 → 그대로 유지
+            pass
+
+    # 버퍼에 추가
+    buffer.append(current_angle)
+
+    # 이동 평균 계산
+    smoothed = sum(buffer) / len(buffer)
+
+    # 180° 이상이면 0~180 범위로 정규화
+    if smoothed >= 180:
+        smoothed -= 180
+
+    return smoothed
+
 # ---------------- Temporal Smoothing ----------------
 # 이전 프레임의 라인 위치를 기억하여 일시적 손실 대비
 line_position_history = deque(maxlen=5)
@@ -188,24 +226,36 @@ def analyze_line_mask(mask):
             if line_angle < 0:
                 line_angle += 180
 
+            # 각도 스무딩 적용 (0°/180° 점프 방지)
+            line_angle = smooth_angle(line_angle, angle_buffer)
+
     return True, line_center_x, line_angle, confidence
 
 def calculate_steering_angle(line_center_x, line_angle, frame_width=IMG_SIZE):
 
-    # 화면 중심에서의 오차 계산
     center_error = (line_center_x - 0.5) * 2  # -1 ~ 1 범위
 
-    # PID 제어로 조향각 계산
     correction = pid_controller.update(center_error)
 
-    # 기본 각도 90도(직진)에서 보정값 추가
-    # center_error > 0: 라인이 오른쪽 -> 왼쪽으로 회전 필요 (각도 감소)
-    # center_error < 0: 라인이 왼쪽 -> 오른쪽으로 회전 필요 (각도 증가)
-    servo_angle = 90 - (correction * 30)  # 최대 ±30도 보정
+    # 서보 각도 계산
+    # center_error > 0 (라인이 오른쪽) → servo > 90 (오른쪽 회전)
+    # center_error < 0 (라인이 왼쪽) → servo < 90 (왼쪽 회전)
+    servo_angle = 90 + (correction * 30)  # - 에서 + 로 변경!  
 
-    # 라인 각도도 반영 (추가적인 미세 조정)
-    angle_correction = (line_angle - 90) * 0.2
-    servo_angle -= angle_correction
+
+    angle_deviation = line_angle - 90
+
+    # 수평선 근처(0°/180°)는 각도 정보가 불안정하므로 무시
+    # ±60도 이상 벗어나면(30도 미만 또는 150도 초과) 각도 보정 안 함
+    if abs(angle_deviation) > 60:
+        # 수평선에 가까움 → 각도 보정 사용 안 함
+        angle_correction = 0
+    else:
+        # 수직선에 가까움 (30~150도 범위)
+        # angle_deviation이 양수(135도 방향) → servo 감소(왼쪽)
+        # angle_deviation이 음수(45도 방향) → servo 증가(오른쪽)
+        angle_correction = angle_deviation * 0.15
+        servo_angle -= angle_correction
 
     # 범위 제한
     servo_angle = max(45, min(135, servo_angle))
