@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # train_source.py  (TF1 Freeze -> TFLite 안정 변환 버전)
-import os, argparse, time, cv2, numpy as np, pandas as pd
-import tensorflow.compat.v1 as tf
+import os, argparse, time, cv2, numpy as np, pandas as pd # type : ignore
+import tensorflow.compat.v1 as tf # type: ignore
 
 # --- TF1 모드 설정 ---
 tf.disable_v2_behavior()
