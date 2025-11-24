@@ -11,9 +11,10 @@ from picamera2 import Picamera2
 from collections import deque
 
 # ---------------- Model & Camera Setup ----------------
-IMG_SIZE = 160  # 경량 모델용 (240 → 160)
+IMG_SIZE = 160  # 경량 segmentation 모델용 (240 → 160)
+COLOR_SIZE = 64  # 경량 color 모델용 (240 → 64)
 segmentation_model_path = "./line_segmentation_light.tflite"  # 경량 모델
-color_model_path = "./color.tflite"
+color_model_path = "./color_light.tflite"  # 경량 색상 모델
 color_labels = ["green", "red"]
 
 # Load segmentation model
@@ -139,9 +140,9 @@ def stop_motor():
     motor_pwm.ChangeDutyCycle(0)
 
 # ---------------- Image Processing ----------------
-def preprocess_frame(frame):
+def preprocess_frame(frame, target_size=IMG_SIZE):
     """프레임을 모델 입력 형식으로 변환"""
-    img = cv2.resize(frame, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_AREA)
+    img = cv2.resize(frame, (target_size, target_size), interpolation=cv2.INTER_AREA)
     img = img.astype(np.float32) / 255.0
     return img[None, ...]
 
@@ -161,8 +162,8 @@ def get_line_mask(frame):
     return binary_mask
 
 def get_color_prediction(frame):
-    """색상 검출 (기존 모델 사용)"""
-    x = preprocess_frame(frame)
+    """색상 검출 (경량 모델 사용)"""
+    x = preprocess_frame(frame, target_size=COLOR_SIZE)  # 64x64로 리사이즈
     color_interpreter.set_tensor(color_inp["index"], x)
     color_interpreter.invoke()
     probs = color_interpreter.get_tensor(color_out["index"])[0]
