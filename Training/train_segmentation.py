@@ -1,7 +1,3 @@
-#!/usr/bin/env python3
-# train_segmentation.py
-# Semantic Segmentation 모델 학습 스크립트
-
 import os
 import numpy as np
 import tensorflow as tf
@@ -10,7 +6,6 @@ from tensorflow.keras import layers
 import cv2
 from sklearn.model_selection import train_test_split
 
-# tensorflow-addons for rotation (optional)
 try:
     import tensorflow_addons as tfa
     HAS_TFA = True
@@ -48,7 +43,7 @@ def load_dataset(images_dir, masks_dir):
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
 
-        # 마스크 로드 (같은 파일명으로 저장되어 있어야 함)
+        # 마스크 로드
         mask_path = os.path.join(masks_dir, img_file)
 
         if not os.path.exists(mask_path):
@@ -196,7 +191,7 @@ def build_unet_mobilenet(input_shape=(IMG_SIZE, IMG_SIZE, 3), dropout_rate=0.3):
 
     return model
 
-# ---------------- Dice Loss (Segmentation에 효과적) ----------------
+# ---------------- Dice Loss ----------------
 def dice_coefficient(y_true, y_pred, smooth=1e-6):
     """Dice coefficient (F1 score의 일종)"""
     y_true_f = tf.reshape(y_true, [-1])
@@ -303,28 +298,76 @@ def train_model():
     print(f"Best validation Dice coefficient: {max(history.history['val_dice_coefficient']):.4f}")
     print(f"Best validation accuracy: {max(history.history['val_binary_accuracy']):.4f}")
 
-    # TFLite 변환
+    # TFLite 변환 (두 버전 모두 생성)
     print("\nConverting to TFLite...")
-    convert_to_tflite(model)
+
+    # 1. INT8 양자화 (빠름, 권장)
+    convert_to_tflite(model, use_int8=True)
+
+    # 2. Float16 양자화 (정확도 높음)
+    convert_to_tflite(model, use_int8=False)
 
     print(f"\nModels saved:")
     print(f"  - Keras model: {MODEL_SAVE_PATH}")
-    print(f"  - TFLite model: {TFLITE_SAVE_PATH}")
+    print(f"  - TFLite INT8: {TFLITE_SAVE_PATH.replace('.tflite', '_int8.tflite')} (권장)")
+    print(f"  - TFLite Float16: {TFLITE_SAVE_PATH.replace('.tflite', '_float16.tflite')}")
 
-def convert_to_tflite(model):
-    """Keras 모델을 TFLite로 변환 (최적화 포함)"""
+def convert_to_tflite(model, use_int8=True):
+    """
+    Keras 모델을 TFLite로 변환 (최적화 포함)
+
+    Args:
+        model: Keras 모델
+        use_int8: True면 INT8 양자화 (빠름, 약간 정확도 하락)
+                  False면 Float16 (느림, 정확도 유지)
+    """
     converter = tf.lite.TFLiteConverter.from_keras_model(model)
 
-    # 최적화: Float16 quantization (속도 향상 + 모델 크기 감소)
-    converter.optimizations = [tf.lite.Optimize.DEFAULT]
-    converter.target_spec.supported_types = [tf.float16]
+    if use_int8:
+        print("[INFO] Using INT8 quantization (faster inference)")
+
+        # INT8 양자화 설정
+        converter.optimizations = [tf.lite.Optimize.DEFAULT]
+
+        # Representative dataset 생성 (양자화 캘리브레이션용)
+        def representative_data_gen():
+            # 학습 데이터에서 샘플링
+            images_dir = IMAGES_DIR
+            image_files = sorted([f for f in os.listdir(images_dir) if f.endswith(('.jpg', '.png'))])
+
+            # 최대 100개 샘플 사용
+            num_samples = min(100, len(image_files))
+
+            for i in range(num_samples):
+                img_path = os.path.join(images_dir, image_files[i])
+                img = cv2.imread(img_path)
+                img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                img = img.astype(np.float32) / 255.0
+                img = np.expand_dims(img, axis=0)
+                yield [img]
+
+        converter.representative_dataset = representative_data_gen
+
+        # INT8 입력/출력 강제
+        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+        converter.inference_input_type = tf.uint8  # 입력을 uint8로
+        converter.inference_output_type = tf.uint8  # 출력을 uint8로
+
+    else:
+        print("[INFO] Using Float16 quantization (higher accuracy)")
+        # Float16 quantization (속도 향상 + 모델 크기 감소)
+        converter.optimizations = [tf.lite.Optimize.DEFAULT]
+        converter.target_spec.supported_types = [tf.float16]
 
     tflite_model = converter.convert()
 
     # 저장
-    with open(TFLITE_SAVE_PATH, 'wb') as f:
+    save_path = TFLITE_SAVE_PATH.replace('.tflite', '_int8.tflite' if use_int8 else '_float16.tflite')
+    with open(save_path, 'wb') as f:
         f.write(tflite_model)
 
+    print(f"TFLite model saved: {save_path}")
     print(f"TFLite model size: {len(tflite_model) / 1024 / 1024:.2f} MB")
 
 # ---------------- 실행 ----------------
