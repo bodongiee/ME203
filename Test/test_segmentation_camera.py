@@ -10,7 +10,7 @@ import tflite_runtime.interpreter as tflite
 
 # ---------------- 설정 ----------------
 TFLITE_MODEL_PATH = "../line_segmentation.tflite"
-IMG_SIZE = 240
+IMG_SIZE = 160  # 모델 입력 크기 (자동으로 조정됨)
 
 # 디스플레이 설정
 DISPLAY_WIDTH = 640
@@ -34,6 +34,19 @@ print(f"  Input shape: {input_details[0]['shape']}")
 print(f"  Output shape: {output_details[0]['shape']}")
 print(f"  Input dtype: {input_details[0]['dtype']}")
 print(f"  Output dtype: {output_details[0]['dtype']}")
+
+# INT8 양자화 모델 확인
+input_dtype = input_details[0]['dtype']
+output_dtype = output_details[0]['dtype']
+is_int8_model = (input_dtype == np.uint8)
+print(f"[INFO] INT8 quantized model: {is_int8_model}")
+
+# 모델 입력 크기 자동 확인
+model_input_size = input_details[0]['shape'][1]  # [1, height, width, 3]
+if model_input_size != IMG_SIZE:
+    print(f"[WARNING] IMG_SIZE ({IMG_SIZE}) != model input size ({model_input_size})")
+    IMG_SIZE = model_input_size
+    print(f"[INFO] Updated IMG_SIZE to {IMG_SIZE}")
 
 # ---------------- PiCamera2 초기화 ----------------
 print("[INFO] Initializing PiCamera2...")
@@ -61,9 +74,15 @@ try:
         # 프레임 캡처
         frame = picam2.capture_array()  # (240, 240, 3) RGB
 
-        # 전처리
-        input_data = frame.astype(np.float32) / 255.0
-        input_data = np.expand_dims(input_data, axis=0)  # (1, 240, 240, 3)
+        # 전처리 (INT8/FLOAT32 구분)
+        if is_int8_model:
+            # INT8 양자화 모델: 0-255 uint8 그대로 사용
+            input_data = frame.astype(np.uint8)
+            input_data = np.expand_dims(input_data, axis=0)
+        else:
+            # FLOAT32 모델: 0-1 정규화
+            input_data = frame.astype(np.float32) / 255.0
+            input_data = np.expand_dims(input_data, axis=0)
 
         # 추론
         inference_start = time.time()
@@ -72,12 +91,18 @@ try:
         output_data = interpreter.get_tensor(output_details[0]['index'])
         inference_time = (time.time() - inference_start) * 1000
 
-        # 출력 처리 (sigmoid 적용 + 이진화)
-        mask = output_data[0]  # (240, 240, 1)
-        mask = mask.squeeze()  # (240, 240)
+        # 출력 처리
+        mask = output_data[0].squeeze()  # (240, 240)
 
-        # Sigmoid (모델 출력이 logit이면)
-        # mask = 1.0 / (1.0 + np.exp(-mask))
+        # INT8 양자화 출력 역양자화
+        if output_dtype == np.uint8 or output_dtype == np.int8:
+            output_quant = output_details[0].get('quantization_parameters', {})
+            output_scale = output_quant.get('scales', [1.0])[0]
+            output_zero_point = output_quant.get('zero_points', [0])[0]
+
+            # 역양자화 + Sigmoid
+            mask = (mask.astype(np.float32) - output_zero_point) * output_scale
+            mask = 1.0 / (1.0 + np.exp(-np.clip(mask, -10, 10)))
 
         # 이진화 (threshold=0.5)
         mask_binary = (mask > 0.5).astype(np.uint8) * 255

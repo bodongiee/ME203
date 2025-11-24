@@ -23,11 +23,20 @@ seg_interpreter.allocate_tensors()
 seg_inp = seg_interpreter.get_input_details()[0]
 seg_out = seg_interpreter.get_output_details()[0]
 
+# INT8 양자화 모델 확인
+seg_is_int8 = (seg_inp['dtype'] == np.uint8)
+print(f"[INFO] Segmentation model INT8: {seg_is_int8}")
+print(f"  Input dtype: {seg_inp['dtype']}, Output dtype: {seg_out['dtype']}")
+
 # Load color model
 color_interpreter = tflite.Interpreter(model_path=color_model_path)
 color_interpreter.allocate_tensors()
 color_inp = color_interpreter.get_input_details()[0]
 color_out = color_interpreter.get_output_details()[0]
+
+color_is_int8 = (color_inp['dtype'] == np.uint8)
+print(f"[INFO] Color model INT8: {color_is_int8}")
+print(f"  Input dtype: {color_inp['dtype']}, Output dtype: {color_out['dtype']}")
 
 # Camera setup
 picam2 = Picamera2()
@@ -140,22 +149,39 @@ def stop_motor():
     motor_pwm.ChangeDutyCycle(0)
 
 # ---------------- Image Processing ----------------
-def preprocess_frame(frame, target_size=IMG_SIZE):
+def preprocess_frame(frame, target_size=IMG_SIZE, is_int8=False):
     """프레임을 모델 입력 형식으로 변환"""
     img = cv2.resize(frame, (target_size, target_size), interpolation=cv2.INTER_AREA)
-    img = img.astype(np.float32) / 255.0
+    if is_int8:
+        # INT8 양자화 모델: 0-255 uint8 그대로
+        img = img.astype(np.uint8)
+    else:
+        # FLOAT32 모델: 0-1 정규화
+        img = img.astype(np.float32) / 255.0
     return img[None, ...]
 
 def get_line_mask(frame):
     """Segmentation 모델로 라인 마스크 얻기"""
-    x = preprocess_frame(frame)
+    x = preprocess_frame(frame, target_size=IMG_SIZE, is_int8=seg_is_int8)
     seg_interpreter.set_tensor(seg_inp["index"], x)
     seg_interpreter.invoke()
     mask = seg_interpreter.get_tensor(seg_out["index"])[0]
 
-    # 출력이 (240, 240, 1) 형태라고 가정
+    # 출력이 (160, 160, 1) 형태라고 가정
     if len(mask.shape) == 3:
         mask = mask[:, :, 0]
+    else:
+        mask = mask.squeeze()
+
+    # INT8 양자화 출력 역양자화
+    if seg_out['dtype'] == np.uint8 or seg_out['dtype'] == np.int8:
+        output_quant = seg_out.get('quantization_parameters', {})
+        output_scale = output_quant.get('scales', [1.0])[0]
+        output_zero_point = output_quant.get('zero_points', [0])[0]
+
+        # 역양자화 + Sigmoid
+        mask = (mask.astype(np.float32) - output_zero_point) * output_scale
+        mask = 1.0 / (1.0 + np.exp(-np.clip(mask, -10, 10)))
 
     # 확률값을 0/1 마스크로 변환
     binary_mask = (mask > 0.5).astype(np.uint8) * 255
@@ -163,7 +189,7 @@ def get_line_mask(frame):
 
 def get_color_prediction(frame):
     """색상 검출 (경량 모델 사용)"""
-    x = preprocess_frame(frame, target_size=COLOR_SIZE)  # 64x64로 리사이즈
+    x = preprocess_frame(frame, target_size=COLOR_SIZE, is_int8=color_is_int8)  # 64x64로 리사이즈
     color_interpreter.set_tensor(color_inp["index"], x)
     color_interpreter.invoke()
     probs = color_interpreter.get_tensor(color_out["index"])[0]
