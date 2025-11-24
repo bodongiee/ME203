@@ -11,8 +11,8 @@ from picamera2 import Picamera2
 from collections import deque
 
 # ---------------- Model & Camera Setup ----------------
-IMG_SIZE = 240
-segmentation_model_path = "./line_segmentation.tflite"
+IMG_SIZE = 160  # 경량 모델용 (240 → 160)
+segmentation_model_path = "./line_segmentation_light.tflite"  # 경량 모델
 color_model_path = "./color.tflite"
 color_labels = ["green", "red"]
 
