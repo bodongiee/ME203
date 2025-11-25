@@ -115,6 +115,13 @@ try:
         # 이진화
         mask_binary = (mask > 0.5).astype(np.uint8) * 255
 
+        # 테두리 제거 (10픽셀씩 잘라내기)
+        border = 10
+        mask_binary[:border, :] = 0  # 상단
+        mask_binary[-border:, :] = 0  # 하단
+        mask_binary[:, :border] = 0  # 좌측
+        mask_binary[:, -border:] = 0  # 우측
+
         # 5. 라인 중심 계산
         line_pixels = np.sum(mask_binary > 0)
 

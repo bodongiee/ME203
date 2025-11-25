@@ -197,6 +197,14 @@ def get_line_mask(frame):
 
     # 확률값을 0/1 마스크로 변환
     binary_mask = (mask > 0.5).astype(np.uint8) * 255
+
+    # 테두리 제거 (10픽셀씩 잘라내기)
+    border = 10
+    binary_mask[:border, :] = 0  # 상단
+    binary_mask[-border:, :] = 0  # 하단
+    binary_mask[:, :border] = 0  # 좌측
+    binary_mask[:, -border:] = 0  # 우측
+
     return binary_mask
 
 def get_color_prediction(frame):

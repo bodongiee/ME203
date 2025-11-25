@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 
 # 테스트 이미지 생성 (240x240)
-img_size = 240
+img_size = 160
 
 def draw_line_and_test(angle_deg, description):
     """특정 각도로 라인을 그리고 fitEllipse로 각도 확인"""
