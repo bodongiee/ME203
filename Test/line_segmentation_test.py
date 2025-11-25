@@ -86,7 +86,7 @@ class PIDController:
         self.prev_error = 0
         self.integral = 0
 
-pid_controller = PIDController(kp=1.2, ki=0.01, kd=0.6)  # 곡률 대응 강화
+pid_controller = PIDController(kp=1.5, ki=0.015, kd=0.8)  # 급커브 대응 강화
 
 # ---------------- Angle Smoothing ----------------
 from collections import deque
@@ -234,26 +234,15 @@ def analyze_line_mask(mask):
     if line_pixels < 50:  # 50픽셀만 있어도 추적 시도
         return False, 0.5, 0, confidence
 
-    # Look-ahead: 화면을 상/하로 나누어 가중 평균
-    # 상단(먼 곳) 70% + 하단(가까운 곳) 30% 가중치
-    height = roi_mask.shape[0]
-    upper_roi = roi_mask[:height//2, :]  # 상단 절반
-    lower_roi = roi_mask[height//2:, :]  # 하단 절반
+    # Moments를 이용한 라인 중심 계산
+    moments = cv2.moments(roi_mask)
 
-    # 상단 라인 중심 (Look-ahead)
-    upper_moments = cv2.moments(upper_roi)
-    upper_cx = 0.5 * width  # 기본값
-    if upper_moments['m00'] > 0:
-        upper_cx = upper_moments['m10'] / upper_moments['m00']
+    if moments['m00'] == 0:
+        return False, 0.5, 0, confidence
 
-    # 하단 라인 중심 (현재 위치)
-    lower_moments = cv2.moments(lower_roi)
-    lower_cx = 0.5 * width  # 기본값
-    if lower_moments['m00'] > 0:
-        lower_cx = lower_moments['m10'] / lower_moments['m00']
-
-    # 가중 평균: 상단 70% + 하단 30% (먼 곳을 더 중요하게)
-    cx = upper_cx * 0.7 + lower_cx * 0.3
+    # 라인 중심점
+    cx = moments['m10'] / moments['m00']
+    cy = moments['m01'] / moments['m00']
 
     # 정규화 (0~1 범위)
     line_center_x = cx / width
@@ -290,7 +279,7 @@ def calculate_steering_angle(line_center_x, line_angle, frame_width=IMG_SIZE):
     # 서보 각도 계산
     # center_error > 0 (라인이 오른쪽) → servo > 90 (오른쪽 회전)
     # center_error < 0 (라인이 왼쪽) → servo < 90 (왼쪽 회전)
-    servo_angle = 90 + (correction * 25)  # 곡률 대응을 위해 증가  
+    servo_angle = 90 + (correction * 28)  # 급커브 대응 증가  
 
 
     angle_deviation = line_angle - 90
@@ -306,7 +295,7 @@ def calculate_steering_angle(line_center_x, line_angle, frame_width=IMG_SIZE):
         # angle_deviation이 음수(45도 방향) → servo 증가(오른쪽)
 
         # 급커브 대응: 각도 편차가 클수록 더 강하게 반응
-        angle_weight = 0.08 + (abs(angle_deviation) / 60.0) * 0.12  # 0.08~0.20 동적 조정
+        angle_weight = 0.15 + (abs(angle_deviation) / 60.0) * 0.25  # 0.15~0.40 동적 조정
         angle_correction = angle_deviation * angle_weight
         servo_angle -= angle_correction
 
