@@ -53,7 +53,6 @@ MOTOR_FREQ = 1000
 SERVO_FREQ = 50
 SERVO_MAX_DUTY = 12
 SERVO_MIN_DUTY = 3
-
 SPEED_FORWARD = 65
 SPEED_TURN = 50
 
@@ -87,7 +86,7 @@ class PIDController:
         self.prev_error = 0
         self.integral = 0
 
-pid_controller = PIDController(kp=1.8, ki=0.02, kd=1.0)
+pid_controller = PIDController(kp=1.2, ki=0.01, kd=0.6)  # 곡률 대응 강화
 
 # ---------------- Angle Smoothing ----------------
 from collections import deque
@@ -95,25 +94,38 @@ from collections import deque
 angle_buffer = deque(maxlen=5)  # 최근 5개 각도 저장
 
 def smooth_angle(current_angle, buffer):
+    """
+    각도 스무딩 (0°/180° 점프 방지)
+
+    핵심 원리:
+    - 0°와 180°는 같은 방향 (수평선)
+    - 큰 점프 발생 시 각도를 통일된 범위로 변환
+    - 모든 버퍼 값을 같은 기준으로 유지
+    """
 
     if len(buffer) == 0:
         buffer.append(current_angle)
         return current_angle
 
-    # 이전 각도와의 차이 계산
-    prev_angle = buffer[-1]
-    diff = abs(current_angle - prev_angle)
+    # 이전 스무딩된 각도 (버퍼의 평균)
+    prev_smoothed = sum(buffer) / len(buffer)
+
+    # 현재 각도와 이전 평균의 차이
+    diff = abs(current_angle - prev_smoothed)
 
     # 180도 점프 감지 및 보정
-    if diff > 90:  # 큰 각도 차이 = 0°/180° 점프
-        # 0°와 180°는 같은 방향 (수평선)
-        # 더 가까운 쪽으로 통일
+    if diff > 90:
+        # 0° 근처와 180° 근처 중 어느 쪽에 가까운지 판단
         if current_angle < 90:
-            # 0° 근처 → 180°으로 변환
+            # 현재 0° 근처, 이전이 180° 근처라면
+            # → 현재를 180° 영역으로 변환
             current_angle += 180
         else:
-            # 180° 근처 → 그대로 유지
-            pass
+            # 현재 180° 근처, 이전이 0° 근처라면
+            # → 버퍼 전체를 180° 영역으로 변환
+            for i in range(len(buffer)):
+                if buffer[i] < 90:
+                    buffer[i] += 180
 
     # 버퍼에 추가
     buffer.append(current_angle)
@@ -122,7 +134,7 @@ def smooth_angle(current_angle, buffer):
     smoothed = sum(buffer) / len(buffer)
 
     # 180° 이상이면 0~180 범위로 정규화
-    if smoothed >= 180:
+    while smoothed >= 180:
         smoothed -= 180
 
     return smoothed
@@ -222,15 +234,26 @@ def analyze_line_mask(mask):
     if line_pixels < 50:  # 50픽셀만 있어도 추적 시도
         return False, 0.5, 0, confidence
 
-    # Moments를 이용한 라인 중심 계산
-    moments = cv2.moments(roi_mask)
+    # Look-ahead: 화면을 상/하로 나누어 가중 평균
+    # 상단(먼 곳) 70% + 하단(가까운 곳) 30% 가중치
+    height = roi_mask.shape[0]
+    upper_roi = roi_mask[:height//2, :]  # 상단 절반
+    lower_roi = roi_mask[height//2:, :]  # 하단 절반
 
-    if moments['m00'] == 0:
-        return False, 0.5, 0, confidence
+    # 상단 라인 중심 (Look-ahead)
+    upper_moments = cv2.moments(upper_roi)
+    upper_cx = 0.5 * width  # 기본값
+    if upper_moments['m00'] > 0:
+        upper_cx = upper_moments['m10'] / upper_moments['m00']
 
-    # 라인 중심점
-    cx = moments['m10'] / moments['m00']
-    cy = moments['m01'] / moments['m00']
+    # 하단 라인 중심 (현재 위치)
+    lower_moments = cv2.moments(lower_roi)
+    lower_cx = 0.5 * width  # 기본값
+    if lower_moments['m00'] > 0:
+        lower_cx = lower_moments['m10'] / lower_moments['m00']
+
+    # 가중 평균: 상단 70% + 하단 30% (먼 곳을 더 중요하게)
+    cx = upper_cx * 0.7 + lower_cx * 0.3
 
     # 정규화 (0~1 범위)
     line_center_x = cx / width
@@ -267,7 +290,7 @@ def calculate_steering_angle(line_center_x, line_angle, frame_width=IMG_SIZE):
     # 서보 각도 계산
     # center_error > 0 (라인이 오른쪽) → servo > 90 (오른쪽 회전)
     # center_error < 0 (라인이 왼쪽) → servo < 90 (왼쪽 회전)
-    servo_angle = 90 + (correction * 30)  # - 에서 + 로 변경!  
+    servo_angle = 90 + (correction * 25)  # 곡률 대응을 위해 증가  
 
 
     angle_deviation = line_angle - 90
@@ -281,7 +304,10 @@ def calculate_steering_angle(line_center_x, line_angle, frame_width=IMG_SIZE):
         # 수직선에 가까움 (30~150도 범위)
         # angle_deviation이 양수(135도 방향) → servo 감소(왼쪽)
         # angle_deviation이 음수(45도 방향) → servo 증가(오른쪽)
-        angle_correction = angle_deviation * 0.15
+
+        # 급커브 대응: 각도 편차가 클수록 더 강하게 반응
+        angle_weight = 0.08 + (abs(angle_deviation) / 60.0) * 0.12  # 0.08~0.20 동적 조정
+        angle_correction = angle_deviation * angle_weight
         servo_angle -= angle_correction
 
     # 범위 제한
