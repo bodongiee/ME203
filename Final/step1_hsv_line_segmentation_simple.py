@@ -1,6 +1,6 @@
 #!/home/mecha/venvs/tflite/bin/python
-# step1_line_segmentation_simple.py
-# 빨간불 정지 → 초록불 전진 후 종료
+# step1_hsv_line_segmentation_simple.py
+# HSV 색상 감지로 빨간불 정지 → 초록불 전진 후 종료
 
 import numpy as np
 import cv2
@@ -11,9 +11,8 @@ from picamera2 import Picamera2
 
 # ---------------- 설정 ----------------
 IMG_SIZE = 160
-COLOR_SIZE = 160  # 64 → 160 (새 모델)
+COLOR_SIZE = 160  # HSV 감지용 크롭 크기
 MODEL_PATH = "./line_segmentation_light.tflite"
-COLOR_MODEL_PATH = "./color_light_160.tflite"  # 새 모델
 
 # GPIO
 SERVO_PIN = 13
@@ -26,8 +25,19 @@ PWM_PIN = 12
 MOTOR_FREQ = 1000
 SPEED = 25  # 일정 속도
 
+# HSV 색상 범위 (실제 환경에 맞게 조정 필요)
+# Green: H=40~80 (초록색)
+GREEN_LOWER = np.array([40, 50, 50])
+GREEN_UPPER = np.array([80, 255, 255])
+
+# Red: H=0~10 또는 160~180 (빨간색은 HSV에서 두 구간)
+RED_LOWER1 = np.array([0, 50, 50])
+RED_UPPER1 = np.array([10, 255, 255])
+RED_LOWER2 = np.array([160, 50, 50])
+RED_UPPER2 = np.array([180, 255, 255])
+
 print("="*60)
-print("Step 1: 빨간불 정지 → 초록불 전진")
+print("Step 1: 빨간불 정지 → 초록불 전진 (HSV 감지)")
 print("="*60)
 
 # ---------------- GPIO 초기화 ----------------
@@ -50,7 +60,41 @@ def set_motor(speed):
     GPIO.output(DIR_PIN, GPIO.HIGH)  # 전진
     motor_pwm.ChangeDutyCycle(speed)
 
-# ---------------- TFLite 모델 로드 ----------------
+def detect_color_hsv(rgb_image):
+    """
+    HSV 색상 감지
+    Returns: ("green", confidence) 또는 ("red", confidence) 또는 ("none", 0.0)
+    """
+    # RGB → HSV 변환
+    hsv = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2HSV)
+
+    # Green 마스크
+    green_mask = cv2.inRange(hsv, GREEN_LOWER, GREEN_UPPER)
+    green_pixels = np.sum(green_mask > 0)
+
+    # Red 마스크 (두 구간)
+    red_mask1 = cv2.inRange(hsv, RED_LOWER1, RED_UPPER1)
+    red_mask2 = cv2.inRange(hsv, RED_LOWER2, RED_UPPER2)
+    red_mask = cv2.bitwise_or(red_mask1, red_mask2)
+    red_pixels = np.sum(red_mask > 0)
+
+    total_pixels = rgb_image.shape[0] * rgb_image.shape[1]
+    green_ratio = green_pixels / total_pixels
+    red_ratio = red_pixels / total_pixels
+
+    # 신뢰도 계산: 픽셀 비율을 0~1로 정규화 (10% 이상이면 1.0)
+    green_conf = min(green_ratio / 0.1, 1.0)
+    red_conf = min(red_ratio / 0.1, 1.0)
+
+    # 더 높은 쪽 반환
+    if green_conf > red_conf and green_conf > 0.3:
+        return "green", green_conf
+    elif red_conf > green_conf and red_conf > 0.3:
+        return "red", red_conf
+    else:
+        return "none", 0.0
+
+# ---------------- TFLite 모델 로드 (라인 감지용) ----------------
 print("\n[INFO] Loading segmentation model...")
 seg_interpreter = tflite.Interpreter(model_path=MODEL_PATH)
 seg_interpreter.allocate_tensors()
@@ -61,15 +105,7 @@ seg_output_details = seg_interpreter.get_output_details()[0]
 seg_is_int8 = (seg_input_details['dtype'] == np.uint8)
 print(f"✓ Segmentation model loaded (INT8: {seg_is_int8})")
 
-print("\n[INFO] Loading color model...")
-color_interpreter = tflite.Interpreter(model_path=COLOR_MODEL_PATH)
-color_interpreter.allocate_tensors()
-
-color_input_details = color_interpreter.get_input_details()[0]
-color_output_details = color_interpreter.get_output_details()[0]
-
-color_is_int8 = (color_input_details['dtype'] == np.uint8)
-print(f"✓ Color model loaded (INT8: {color_is_int8})")
+print("\n[INFO] Using HSV color detection (no model)")
 
 # ---------------- 카메라 초기화 ----------------
 print("\n[INFO] Initializing camera...")
@@ -100,35 +136,14 @@ try:
         # 1. 프레임 캡처
         frame = picam2.capture_array()
 
-        # 2-1. 색상 감지용 전처리 (64x64 크롭)
+        # 2-1. HSV 색상 감지용 전처리 (160x160 크롭)
         h, w = frame.shape[:2]
         y_color = (h - COLOR_SIZE) // 2
         x_color = (w - COLOR_SIZE) // 2
         color_cropped = frame[y_color:y_color+COLOR_SIZE, x_color:x_color+COLOR_SIZE]
 
-        if color_is_int8:
-            color_input = color_cropped.astype(np.uint8)
-        else:
-            color_input = color_cropped.astype(np.float32) / 255.0
-        color_input = np.expand_dims(color_input, axis=0)
-
-        color_interpreter.set_tensor(color_input_details['index'], color_input)
-        color_interpreter.invoke()
-        color_output = color_interpreter.get_tensor(color_output_details['index'])[0]
-
-        # INT8 역양자화
-        if color_output_details['dtype'] == np.uint8 or color_output_details['dtype'] == np.int8:
-            color_quant = color_output_details.get('quantization_parameters', {})
-            color_scale = color_quant.get('scales', [1.0])[0]
-            color_zero = color_quant.get('zero_points', [0])[0]
-            color_output = (color_output.astype(np.float32) - color_zero) * color_scale
-
-        # Softmax
-        exp_vals = np.exp(color_output - np.max(color_output))
-        color_probs = exp_vals / np.sum(exp_vals)
-        color_idx = np.argmax(color_probs)
-        color_conf = color_probs[color_idx]
-        color_name = ["green", "red"][color_idx]
+        # HSV 색상 감지
+        color_name, color_conf = detect_color_hsv(color_cropped)
 
         # 2-2. 라인 감지용 전처리 (160x160 크롭)
         y_start = (h - IMG_SIZE) // 2
@@ -169,12 +184,12 @@ try:
 
         # 5. 색상 감지 디버그 출력 (매 프레임)
         if frame_count % 3 == 0:
-            print(f"Color: {color_name} ({color_conf:.3f}) | green={color_probs[0]:.3f}, red={color_probs[1]:.3f}")
+            print(f"Color: {color_name:5s} (conf={color_conf:.3f})")
 
         # 6. 상태 머신
         if state == "TRACKING":
-            # 빨간불 감지 (신뢰도 > 70%)
-            if color_name == "red" and color_conf > 0.7:
+            # 빨간불 감지 (신뢰도 > 50%)
+            if color_name == "red" and color_conf > 0.5:
                 print(f"\n🔴 RED LIGHT DETECTED! (conf={color_conf:.3f})")
                 print(f"Stopping...")
                 set_servo_angle(90)
@@ -208,8 +223,8 @@ try:
                 set_motor(0)
 
         elif state == "WAITING_GREEN":
-            # 초록불 감지 대기 (신뢰도 > 70%)
-            if color_name == "green" and color_conf > 0.7:
+            # 초록불 감지 대기 (신뢰도 > 50%)
+            if color_name == "green" and color_conf > 0.5:
                 print(f"\n🟢 GREEN LIGHT DETECTED! Moving forward...")
                 set_servo_angle(90)
                 set_motor(SPEED)

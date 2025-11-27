@@ -12,19 +12,94 @@ import cv2
 from sklearn.model_selection import train_test_split
 
 # ---------------- 설정 ----------------
-IMG_SIZE = 64  # 색상 분류는 작은 크기로도 충분 (240 → 64)
-BATCH_SIZE = 32
-EPOCHS = 30
-LEARNING_RATE = 0.001
+IMG_SIZE = 160  # 64 → 160으로 증가 (더 많은 색상 정보)
+BATCH_SIZE = 16  # 32 → 16 (이미지가 커져서)
+EPOCHS = 50  # 30 → 50 (더 충분히 학습)
+LEARNING_RATE = 0.0001  # 간단한 모델이므로 학습률 높임
 
 # 데이터 경로
-CSV_PATH = "./data/color_annotations.csv"  # filepath, label_id, label
+DATA_DIR = "../../lab8_materials/data_color"  # green/, red/ 폴더가 있는 디렉토리
+CSV_PATH = "./data/color_annotations.csv"  # filepath, label_id, label (CSV가 있으면 사용)
 
 # 모델 저장 경로
-MODEL_SAVE_PATH = "./color_light.h5"
-TFLITE_SAVE_PATH = "./color_light.tflite"
+MODEL_SAVE_PATH = "./color_light_160.h5"
+TFLITE_SAVE_PATH = "./color_light_160.tflite"
 
 # ---------------- 데이터 로드 ----------------
+def load_data_from_folders(data_dir, img_size=IMG_SIZE):
+    """폴더 구조에서 데이터 로드 (green/, red/)"""
+
+    if not os.path.exists(data_dir):
+        raise FileNotFoundError(f"Data directory not found: {data_dir}")
+
+    green_dir = os.path.join(data_dir, "green")
+    red_dir = os.path.join(data_dir, "red")
+
+    if not os.path.exists(green_dir) or not os.path.exists(red_dir):
+        raise FileNotFoundError(f"green/ or red/ folder not found in {data_dir}")
+
+    images = []
+    labels = []
+
+    # Green 이미지 로드 (label_id = 0)
+    print("Loading green images...")
+    green_files = [f for f in os.listdir(green_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+    for i, filename in enumerate(green_files):
+        if i % 50 == 0:
+            print(f"  Green: {i}/{len(green_files)}", end='\r')
+
+        img_path = os.path.join(green_dir, filename)
+        img = cv2.imread(img_path)
+        if img is None:
+            continue
+
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = cv2.resize(img, (img_size, img_size), interpolation=cv2.INTER_AREA)
+        img = img.astype(np.float32) / 255.0
+
+        images.append(img)
+        labels.append(0)  # green = 0
+
+    print(f"\n  Loaded {len(green_files)} green images")
+
+    # Red 이미지 로드 (label_id = 1)
+    print("Loading red images...")
+    red_files = [f for f in os.listdir(red_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+    for i, filename in enumerate(red_files):
+        if i % 50 == 0:
+            print(f"  Red: {i}/{len(red_files)}", end='\r')
+
+        img_path = os.path.join(red_dir, filename)
+        img = cv2.imread(img_path)
+        if img is None:
+            continue
+
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = cv2.resize(img, (img_size, img_size), interpolation=cv2.INTER_AREA)
+        img = img.astype(np.float32) / 255.0
+
+        images.append(img)
+        labels.append(1)  # red = 1
+
+    print(f"\n  Loaded {len(red_files)} red images")
+
+    if len(images) == 0:
+        raise ValueError("No images loaded!")
+
+    # NumPy 배열로 변환
+    images = np.array(images, dtype=np.float32)
+    labels = np.array(labels, dtype=np.int32)
+
+    # One-hot encoding
+    num_classes = 2
+    labels_onehot = tf.keras.utils.to_categorical(labels, num_classes)
+
+    print(f"\nTotal images: {len(images)}")
+    print(f"  Green: {np.sum(labels == 0)}")
+    print(f"  Red: {np.sum(labels == 1)}")
+
+    return images, labels_onehot, num_classes
+
 def load_data_from_csv(csv_path, img_size=IMG_SIZE):
     """CSV에서 이미지 경로와 라벨 로드"""
 
@@ -124,44 +199,34 @@ def create_dataset(images, labels, batch_size, augment_data=True):
     return dataset
 
 # ---------------- 초경량 CNN 모델 ----------------
-def build_tiny_color_cnn(input_shape=(IMG_SIZE, IMG_SIZE, 3), num_classes=2, dropout_rate=0.3):
+def build_tiny_color_cnn(input_shape=(IMG_SIZE, IMG_SIZE, 3), num_classes=2, dropout_rate=0.2):
     """
-    초경량 색상 분류 CNN
-    - MobileNetV2보다 훨씬 가벼움
-    - 색상 분류는 단순 패턴이므로 얕은 네트워크로 충분
+    초간단 색상 분류 CNN
+    - Green/Red는 매우 단순한 색상 차이 → 얕은 네트워크로 충분
+    - 2-block만 사용
     """
 
     inputs = layers.Input(shape=input_shape)
 
-    # Block 1: 64 → 32
-    x = layers.SeparableConv2D(16, 3, padding='same', activation='relu')(inputs)
-    x = layers.SeparableConv2D(16, 3, padding='same', activation='relu')(x)
+    # Block 1: 160 → 80
+    x = layers.Conv2D(16, 3, padding='same', activation='relu')(inputs)
     x = layers.MaxPooling2D(2)(x)
-    x = layers.Dropout(dropout_rate)(x)
 
-    # Block 2: 32 → 16
-    x = layers.SeparableConv2D(32, 3, padding='same', activation='relu')(x)
-    x = layers.SeparableConv2D(32, 3, padding='same', activation='relu')(x)
+    # Block 2: 80 → 40
+    x = layers.Conv2D(32, 3, padding='same', activation='relu')(x)
     x = layers.MaxPooling2D(2)(x)
-    x = layers.Dropout(dropout_rate)(x)
-
-    # Block 3: 16 → 8
-    x = layers.SeparableConv2D(64, 3, padding='same', activation='relu')(x)
-    x = layers.SeparableConv2D(64, 3, padding='same', activation='relu')(x)
-    x = layers.MaxPooling2D(2)(x)
-    x = layers.Dropout(dropout_rate)(x)
 
     # Global Average Pooling
     x = layers.GlobalAveragePooling2D()(x)
 
-    # Dense layers
-    x = layers.Dense(64, activation='relu')(x)
+    # Dense layer
+    x = layers.Dense(32, activation='relu')(x)
     x = layers.Dropout(dropout_rate)(x)
 
     # Output
     outputs = layers.Dense(num_classes, activation='softmax')(x)
 
-    model = keras.Model(inputs, outputs, name='TinyColorCNN')
+    model = keras.Model(inputs, outputs, name='SimpleCNN')
 
     return model
 
@@ -174,8 +239,8 @@ def train_model():
     print("="*60)
 
     # 데이터 로드
-    print("\nLoading data from CSV...")
-    images, labels, num_classes = load_data_from_csv(CSV_PATH)
+    print("\nLoading data from folders...")
+    images, labels, num_classes = load_data_from_folders(DATA_DIR)
 
     if len(images) == 0:
         print("Error: No data found!")
