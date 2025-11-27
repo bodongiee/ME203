@@ -100,7 +100,7 @@ try:
         # 1. 프레임 캡처
         frame = picam2.capture_array()
 
-        # 2-1. 색상 감지용 전처리 (64x64 크롭)
+
         h, w = frame.shape[:2]
         y_color = (h - COLOR_SIZE) // 2
         x_color = (w - COLOR_SIZE) // 2

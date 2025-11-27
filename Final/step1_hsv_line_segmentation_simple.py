@@ -1,7 +1,3 @@
-#!/home/mecha/venvs/tflite/bin/python
-# step1_hsv_line_segmentation_simple.py
-# HSV 색상 감지로 빨간불 정지 → 초록불 전진 후 종료
-
 import numpy as np
 import cv2
 import time
@@ -9,9 +5,10 @@ import RPi.GPIO as GPIO
 import tflite_runtime.interpreter as tflite
 from picamera2 import Picamera2
 
-# ---------------- 설정 ----------------
+
+
 IMG_SIZE = 160
-COLOR_SIZE = 160  # HSV 감지용 크롭 크기
+COLOR_SIZE = 160  
 MODEL_PATH = "./line_segmentation_light.tflite"
 
 # GPIO
@@ -23,7 +20,7 @@ SERVO_MIN_DUTY = 3
 DIR_PIN = 16
 PWM_PIN = 12
 MOTOR_FREQ = 1000
-SPEED = 25  # 일정 속도
+SPEED = 25  
 
 # HSV 색상 범위 (실제 환경에 맞게 조정 필요)
 # Green: H=40~80 (초록색)
@@ -55,24 +52,21 @@ def set_servo_angle(angle):
     servo_pwm.ChangeDutyCycle(duty)
     return angle
 
-def set_motor(speed):
-    """모터 속도 설정"""
-    GPIO.output(DIR_PIN, GPIO.HIGH)  # 전진
+def set_motor(speed, direction="forward"):
+    if direction == "forward":
+        GPIO.output(DIR_PIN, GPIO.HIGH)  
+    elif direction == "backward":
+        GPIO.output(DIR_PIN, GPIO.LOW)  
     motor_pwm.ChangeDutyCycle(speed)
 
 def detect_color_hsv(rgb_image):
-    """
-    HSV 색상 감지
-    Returns: ("green", confidence) 또는 ("red", confidence) 또는 ("none", 0.0)
-    """
-    # RGB → HSV 변환
+
     hsv = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2HSV)
 
-    # Green 마스크
+
     green_mask = cv2.inRange(hsv, GREEN_LOWER, GREEN_UPPER)
     green_pixels = np.sum(green_mask > 0)
 
-    # Red 마스크 (두 구간)
     red_mask1 = cv2.inRange(hsv, RED_LOWER1, RED_UPPER1)
     red_mask2 = cv2.inRange(hsv, RED_LOWER2, RED_UPPER2)
     red_mask = cv2.bitwise_or(red_mask1, red_mask2)
@@ -82,7 +76,6 @@ def detect_color_hsv(rgb_image):
     green_ratio = green_pixels / total_pixels
     red_ratio = red_pixels / total_pixels
 
-    # 신뢰도 계산: 픽셀 비율을 0~1로 정규화 (10% 이상이면 1.0)
     green_conf = min(green_ratio / 0.1, 1.0)
     red_conf = min(red_ratio / 0.1, 1.0)
 
@@ -94,7 +87,7 @@ def detect_color_hsv(rgb_image):
     else:
         return "none", 0.0
 
-# ---------------- TFLite 모델 로드 (라인 감지용) ----------------
+
 print("\n[INFO] Loading segmentation model...")
 seg_interpreter = tflite.Interpreter(model_path=MODEL_PATH)
 seg_interpreter.allocate_tensors()
@@ -123,14 +116,13 @@ time.sleep(0.5)
 print("\n[START] Tracking line until RED light...")
 print("-"*60)
 
-# ---------------- 상태 변수 ----------------
-state = "TRACKING"  # TRACKING, WAITING_GREEN, MOVING_FORWARD, DONE
+state = "TRACKING"  # TRACKING, REVERSING, WAITING_GREEN, MOVING_FORWARD, DONE
 
-# ---------------- 메인 루프 ----------------
 try:
     frame_count = 0
     start_time = time.time()
     green_light_time = None
+    reverse_start_time = None
 
     while True:
         # 1. 프레임 캡처
@@ -182,19 +174,16 @@ try:
         mask_binary[:, :border] = 0  # 좌측
         mask_binary[:, -border:] = 0  # 우측
 
-        # 5. 색상 감지 디버그 출력 (매 프레임)
-        if frame_count % 3 == 0:
-            print(f"Color: {color_name:5s} (conf={color_conf:.3f})")
-
         # 6. 상태 머신
         if state == "TRACKING":
             # 빨간불 감지 (신뢰도 > 50%)
             if color_name == "red" and color_conf > 0.5:
-                print(f"\n🔴 RED LIGHT DETECTED! (conf={color_conf:.3f})")
-                print(f"Stopping...")
+                print(f"\n RED LIGHT DETECTED! (conf={color_conf:.3f})")
+                print(f"Reversing...")
                 set_servo_angle(90)
-                set_motor(0)
-                state = "WAITING_GREEN"
+                set_motor(SPEED, direction="backward")
+                reverse_start_time = time.time()
+                state = "REVERSING"
                 continue
 
             # 라인 추적
@@ -222,11 +211,22 @@ try:
                 set_servo_angle(90)
                 set_motor(0)
 
-        elif state == "WAITING_GREEN":
-            # 초록불 감지 대기 (신뢰도 > 50%)
-            if color_name == "green" and color_conf > 0.5:
-                print(f"\n🟢 GREEN LIGHT DETECTED! Moving forward...")
+        elif state == "REVERSING":
+            elapsed = time.time() - reverse_start_time
+            if elapsed >= 0.5:  # 0.5초 후진
+                print(f"\n✓ Reverse complete. Stopping...")
                 set_servo_angle(90)
+                set_motor(0)
+                state = "WAITING_GREEN"
+            else:
+                set_servo_angle(90)
+                set_motor(SPEED, direction="backward")
+
+        elif state == "WAITING_GREEN":
+
+            if color_name == "green" and color_conf > 0.5:
+                print(f"\n GREEN LIGHT DETECTED! Moving forward...")
+                set_servo_angle(80)  # 80도로 설정
                 set_motor(SPEED)
                 green_light_time = time.time()
                 state = "MOVING_FORWARD"
@@ -236,17 +236,17 @@ try:
                     print(f"WAITING | Color={color_name}({color_conf:.2f})")
 
         elif state == "MOVING_FORWARD":
-            # 1초 전진
+            # 1.5초 전진
             elapsed = time.time() - green_light_time
-            if elapsed >= 1.0:
+            if elapsed >= 1.5:
                 print(f"\n✓ Forward complete. Stopping...")
                 set_servo_angle(90)
                 set_motor(0)
                 state = "DONE"
                 break
             else:
-                # 계속 직진
-                set_servo_angle(90)
+                # 계속 직진 (서보 80도 유지)
+                set_servo_angle(80)
                 set_motor(SPEED)
                 if frame_count % 5 == 0:
                     print(f"FORWARD | Time={elapsed:.1f}s")

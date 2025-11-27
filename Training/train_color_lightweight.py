@@ -13,13 +13,13 @@ from sklearn.model_selection import train_test_split
 
 # ---------------- 설정 ----------------
 IMG_SIZE = 160  # 64 → 160으로 증가 (더 많은 색상 정보)
-BATCH_SIZE = 16  # 32 → 16 (이미지가 커져서)
-EPOCHS = 50  # 30 → 50 (더 충분히 학습)
-LEARNING_RATE = 0.0001  # 간단한 모델이므로 학습률 높임
+BATCH_SIZE = 32  # 배치 크기 증가로 학습 안정화
+EPOCHS = 150  # 에폭 수 증가
+LEARNING_RATE = 0.001  # 초기 학습률 증가 (코사인 어닐링 적용)
 
 # 데이터 경로
-DATA_DIR = "../../lab8_materials/data_color"  # green/, red/ 폴더가 있는 디렉토리
-CSV_PATH = "./data/color_annotations.csv"  # filepath, label_id, label (CSV가 있으면 사용)
+DATA_DIR = "./"  # green/, red/ 폴더가 있는 디렉토리
+CSV_PATH = "./color_annotations.csv"  # filepath, label_id, label (CSV가 있으면 사용)
 
 # 모델 저장 경로
 MODEL_SAVE_PATH = "./color_light_160.h5"
@@ -168,17 +168,21 @@ def augment_color(image, label):
     if tf.random.uniform(()) > 0.5:
         image = tf.image.flip_up_down(image)
 
-    # 랜덤 밝기 조정 (색상 분류에 중요)
-    image = tf.image.random_brightness(image, 0.3)
+    # 랜덤 90도 회전
+    num_rotations = tf.random.uniform((), 0, 4, dtype=tf.int32)
+    image = tf.image.rot90(image, k=num_rotations)
 
-    # 랜덤 대비 조정
-    image = tf.image.random_contrast(image, 0.7, 1.4)
+    # 랜덤 밝기 조정 (색상 분류에 중요) - 범위 증가
+    image = tf.image.random_brightness(image, 0.4)
 
-    # 랜덤 색조 조정 (색상 일반화)
-    image = tf.image.random_hue(image, 0.1)
+    # 랜덤 대비 조정 - 범위 증가
+    image = tf.image.random_contrast(image, 0.6, 1.5)
 
-    # 랜덤 채도 조정
-    image = tf.image.random_saturation(image, 0.7, 1.3)
+    # 랜덤 색조 조정 (색상 일반화) - 범위 증가
+    image = tf.image.random_hue(image, 0.15)
+
+    # 랜덤 채도 조정 - 범위 증가
+    image = tf.image.random_saturation(image, 0.6, 1.4)
 
     # 값 범위 클리핑
     image = tf.clip_by_value(image, 0.0, 1.0)
@@ -199,34 +203,45 @@ def create_dataset(images, labels, batch_size, augment_data=True):
     return dataset
 
 # ---------------- 초경량 CNN 모델 ----------------
-def build_tiny_color_cnn(input_shape=(IMG_SIZE, IMG_SIZE, 3), num_classes=2, dropout_rate=0.2):
+def build_tiny_color_cnn(input_shape=(IMG_SIZE, IMG_SIZE, 3), num_classes=2, dropout_rate=0.3):
     """
-    초간단 색상 분류 CNN
+    초간단 색상 분류 CNN (개선 버전)
     - Green/Red는 매우 단순한 색상 차이 → 얕은 네트워크로 충분
-    - 2-block만 사용
+    - BatchNormalization 추가로 학습 안정화
+    - 3-block 구조로 확장
     """
 
     inputs = layers.Input(shape=input_shape)
 
     # Block 1: 160 → 80
-    x = layers.Conv2D(16, 3, padding='same', activation='relu')(inputs)
+    x = layers.Conv2D(16, 3, padding='same', use_bias=False)(inputs)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation('relu')(x)
     x = layers.MaxPooling2D(2)(x)
 
     # Block 2: 80 → 40
-    x = layers.Conv2D(32, 3, padding='same', activation='relu')(x)
+    x = layers.Conv2D(32, 3, padding='same', use_bias=False)(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation('relu')(x)
+    x = layers.MaxPooling2D(2)(x)
+
+    # Block 3: 40 → 20
+    x = layers.Conv2D(64, 3, padding='same', use_bias=False)(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation('relu')(x)
     x = layers.MaxPooling2D(2)(x)
 
     # Global Average Pooling
     x = layers.GlobalAveragePooling2D()(x)
 
-    # Dense layer
-    x = layers.Dense(32, activation='relu')(x)
+    # Dense layer with stronger regularization
+    x = layers.Dense(64, activation='relu')(x)
     x = layers.Dropout(dropout_rate)(x)
 
     # Output
     outputs = layers.Dense(num_classes, activation='softmax')(x)
 
-    model = keras.Model(inputs, outputs, name='SimpleCNN')
+    model = keras.Model(inputs, outputs, name='ImprovedColorCNN')
 
     return model
 
@@ -253,8 +268,18 @@ def train_model():
 
     print(f"\nTraining samples: {len(X_train)}")
     print(f"Validation samples: {len(X_val)}")
-    print(f"Class distribution (train): {np.bincount(y_train.argmax(axis=1))}")
-    print(f"Class distribution (val): {np.bincount(y_val.argmax(axis=1))}")
+
+    train_class_counts = np.bincount(y_train.argmax(axis=1))
+    val_class_counts = np.bincount(y_val.argmax(axis=1))
+    print(f"Class distribution (train): {train_class_counts}")
+    print(f"Class distribution (val): {val_class_counts}")
+
+    # 클래스 가중치 계산 (불균형 처리)
+    total_train_samples = len(y_train)
+    class_weights = {}
+    for i in range(len(train_class_counts)):
+        class_weights[i] = total_train_samples / (len(train_class_counts) * train_class_counts[i])
+    print(f"Class weights: {class_weights}")
 
     # Dataset 생성
     train_dataset = create_dataset(X_train, y_train, BATCH_SIZE, augment_data=True)
@@ -288,14 +313,14 @@ def train_model():
         keras.callbacks.ReduceLROnPlateau(
             monitor='val_loss',
             factor=0.5,
-            patience=5,
+            patience=8,
             min_lr=1e-7,
             verbose=1
         ),
         keras.callbacks.EarlyStopping(
             monitor='val_accuracy',
             mode='max',
-            patience=10,
+            patience=20,
             restore_best_weights=True,
             verbose=1
         )
@@ -307,7 +332,8 @@ def train_model():
         train_dataset,
         validation_data=val_dataset,
         epochs=EPOCHS,
-        callbacks=callbacks
+        callbacks=callbacks,
+        class_weight=class_weights
     )
 
     # 결과 출력
