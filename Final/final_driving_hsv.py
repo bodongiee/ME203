@@ -20,7 +20,7 @@ SERVO_MIN_DUTY = 3
 DIR_PIN = 16
 PWM_PIN = 12
 MOTOR_FREQ = 1000
-SPEED = 25  
+SPEED = 21
 
 # HSV 색상 범위 (실제 환경에 맞게 조정 필요)
 # Green: H=40~80 (초록색)
@@ -196,7 +196,7 @@ try:
                     line_center_x = cx / IMG_SIZE
 
                     error = (line_center_x - 0.5) * 2
-                    servo_angle = 90 + (error * 25)
+                    servo_angle = 90 + (error * 22)
                     servo_angle = max(45, min(135, servo_angle))
 
                     set_servo_angle(servo_angle)
@@ -226,7 +226,7 @@ try:
 
             if color_name == "green" and color_conf > 0.5:
                 print(f"\n GREEN LIGHT DETECTED! Moving forward...")
-                set_servo_angle(80)  # 80도로 설정
+                set_servo_angle(90)
                 set_motor(SPEED)
                 green_light_time = time.time()
                 state = "MOVING_FORWARD"
@@ -236,10 +236,10 @@ try:
                     print(f"WAITING | Color={color_name}({color_conf:.2f})")
 
         elif state == "MOVING_FORWARD":
-            # 1.5초 전진
+            # 1초 전진
             elapsed = time.time() - green_light_time
-            if elapsed >= 1.5:
-                print(f"\n✓ Forward complete. Stopping...")
+            if elapsed >= 1.0:
+                print(f"\n✓ Forward complete. Mission 1 Done!")
                 set_servo_angle(90)
                 set_motor(0)
                 state = "DONE"
@@ -273,7 +273,7 @@ finally:
     avg_fps = frame_count / total_time if total_time > 0 else 0
 
     print("\n" + "="*60)
-    print("MISSION COMPLETE!")
+    print("MISSION 1 COMPLETE!")
     print("="*60)
     print(f"Final state: {state}")
     print(f"Total frames: {frame_count}")
@@ -281,3 +281,12 @@ finally:
     print(f"Average FPS: {avg_fps:.1f}")
     print("="*60)
     print("[INFO] Cleanup complete")
+
+    # Mission 2 (PID 주행) 시작
+    if state == "DONE":
+        print("\n" + "="*60)
+        print("Starting Mission 2: PID Wall-Following...")
+        print("="*60)
+        time.sleep(1)
+        import subprocess
+        subprocess.run(["python3", "../Ultrasonic_PID_driving/driving_edit.py"])

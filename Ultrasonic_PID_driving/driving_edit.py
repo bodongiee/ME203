@@ -152,109 +152,108 @@ def speed_from_angle_safe(angle, amin=45, amid=90, amax=135,
 
 # ---------------- Main Control ----------------
 try:
-    print("Press 'a' to enter PID autonomous mode, 'q' to quit.")
-    while True:
-        key = get_key()
-        if key == 'q':
-            break
-        if key != 'a':
+    print("="*60)
+    print("PID Autonomous Mode Starting...")
+    print("Press 'q' at any time to quit")
+    print("="*60)
+    time.sleep(0.5)
+
+    # 자동 시작 (키 입력 불필요)
+    print("PID Autonomous mode activated.")
+    prev_error = 0.0
+    integral = 0.0
+    last_left = None
+    last_right = None
+    last_valid_ts = time.time()
+    state = 'TRACKING'
+    MOTOR_SPEED = SPEED_MIN
+    last_time = time.time()
+
+    for _ in range(100000):
+        # 1) 센서 읽기 + 필터
+        raw_left  = read_stable(TRIG_LEFT,  ECHO_LEFT)
+        raw_right = read_stable(TRIG_RIGHT, ECHO_RIGHT)
+        left  = smooth(last_left,  raw_left)
+        right = smooth(last_right, raw_right)
+        last_left, last_right = left, right
+
+        now = time.time()
+        dt = max(1e-3, now - last_time)    # 제어 dt
+        last_time = now
+
+        # 상태 전이
+        if raw_left is not None and raw_right is not None:
+            last_valid_ts = now
+            valid = True
+        else:
+            valid = False
+
+        if not valid and (now - last_valid_ts) > LOST_TIMEOUT:
+            state = 'LOST'
+        elif valid:
+            state = 'TRACKING'
+
+        # 2) 응급 회피
+        if left is not None and left <= EMERGENCY_CM:
+            set_servo_angle(120)
+            target_speed = SPEED_MIN       # 감속
+            MOTOR_SPEED = slew(MOTOR_SPEED, target_speed, SPEED_SLEW)
+            move_forward(MOTOR_SPEED)
+            print(f"[EMERGENCY-L] L:{left:.1f} R:{(right or -1):.1f} spd:{MOTOR_SPEED:.0f}")
             continue
 
-        print("PID Autonomous mode activated.")
-        prev_error = 0.0
-        integral = 0.0
-        last_left = None
-        last_right = None
-        last_valid_ts = time.time()
-        state = 'TRACKING'
-        MOTOR_SPEED = SPEED_MIN
-        last_time = time.time()
-
-        for _ in range(100000):
-            # 1) 센서 읽기 + 필터
-            raw_left  = read_stable(TRIG_LEFT,  ECHO_LEFT)
-            raw_right = read_stable(TRIG_RIGHT, ECHO_RIGHT)
-            left  = smooth(last_left,  raw_left)
-            right = smooth(last_right, raw_right)
-            last_left, last_right = left, right
-
-            now = time.time()
-            dt = max(1e-3, now - last_time)    # 제어 dt
-            last_time = now
-
-            # 상태 전이
-            if raw_left is not None and raw_right is not None:
-                last_valid_ts = now
-                valid = True
-            else:
-                valid = False
-
-            if not valid and (now - last_valid_ts) > LOST_TIMEOUT:
-                state = 'LOST'
-            elif valid:
-                state = 'TRACKING'
-
-            # 2) 응급 회피
-            if left is not None and left <= EMERGENCY_CM:
-                set_servo_angle(120)           
-                target_speed = SPEED_MIN       # 감속
-                MOTOR_SPEED = slew(MOTOR_SPEED, target_speed, SPEED_SLEW)
-                move_forward(MOTOR_SPEED)
-                print(f"[EMERGENCY-L] L:{left:.1f} R:{(right or -1):.1f} spd:{MOTOR_SPEED:.0f}")
-                continue
-
-            if right is not None and right <= EMERGENCY_CM:
-                set_servo_angle(60)            # 왼쪽으로 회피
-                target_speed = SPEED_MIN
-                MOTOR_SPEED = slew(MOTOR_SPEED, target_speed, SPEED_SLEW)
-                move_forward(MOTOR_SPEED)
-                print(f"[EMERGENCY-R] L:{(left or -1):.1f} R:{right:.1f} spd:{MOTOR_SPEED:.0f}")
-                continue
-
-            # 3) 상태별 제어
-            if state == 'LOST':
-                integral = 0.0
-                angle_cmd = base_angle
-                target_speed = speed_from_angle_safe(angle_cmd) * V_SAFE
-                MOTOR_SPEED = slew(MOTOR_SPEED, target_speed, SPEED_SLEW)
-                set_servo_angle(angle_cmd)
-                move_forward(MOTOR_SPEED)
-                print(f"[LOST] L:{left} R:{right} angle:{angle_cmd:.1f} spd:{MOTOR_SPEED:.0f}")
-                continue
-
-            # 4) 정상 벽추종(PID)
-            if left is None or right is None:
-                angle_cmd = base_angle
-                target_speed = speed_from_angle_safe(angle_cmd) * 0.8
-                MOTOR_SPEED = slew(MOTOR_SPEED, target_speed, SPEED_SLEW)
-                set_servo_angle(angle_cmd)
-                move_forward(MOTOR_SPEED)
-                print(f"[HOLD] L:{left} R:{right} angle:{angle_cmd:.1f} spd:{MOTOR_SPEED:.0f}")
-                continue
-
-            # PID 오차(좌-우)
-            error = left - right
-            integral += error * dt
-            integral = max(-200.0, min(200.0, integral))
-            derivative = (error - prev_error) / dt
-            prev_error = error
-
-            output = Kp * error + Ki * integral + Kd * derivative
-            # 조향 계산 및 클램프
-            angle_cmd = max(45.0, min(135.0, base_angle - output))
-            # 속도는 조향 의존(안전한 단조형)
-            target_speed = speed_from_angle_safe(angle_cmd)
+        if right is not None and right <= EMERGENCY_CM:
+            set_servo_angle(60)            # 왼쪽으로 회피
+            target_speed = SPEED_MIN
             MOTOR_SPEED = slew(MOTOR_SPEED, target_speed, SPEED_SLEW)
-
-            # 출력 적용
-            set_servo_angle(round(angle_cmd, 0))
             move_forward(MOTOR_SPEED)
+            print(f"[EMERGENCY-R] L:{(left or -1):.1f} R:{right:.1f} spd:{MOTOR_SPEED:.0f}")
+            continue
 
-            # 모니터링
-            print(f"L:{left:.1f} R:{right:.1f} err:{error:.2f} ang:{angle_cmd:.1f} v:{MOTOR_SPEED:.0f}")
+        # 3) 상태별 제어
+        if state == 'LOST':
+            integral = 0.0
+            angle_cmd = base_angle
+            target_speed = speed_from_angle_safe(angle_cmd) * V_SAFE
+            MOTOR_SPEED = slew(MOTOR_SPEED, target_speed, SPEED_SLEW)
+            set_servo_angle(angle_cmd)
+            move_forward(MOTOR_SPEED)
+            print(f"[LOST] L:{left} R:{right} angle:{angle_cmd:.1f} spd:{MOTOR_SPEED:.0f}")
+            continue
 
-            # 제어주기
-            time.sleep(0.0001)
+        # 4) 정상 벽추종(PID)
+        if left is None or right is None:
+            angle_cmd = base_angle
+            target_speed = speed_from_angle_safe(angle_cmd) * 0.8
+            MOTOR_SPEED = slew(MOTOR_SPEED, target_speed, SPEED_SLEW)
+            set_servo_angle(angle_cmd)
+            move_forward(MOTOR_SPEED)
+            print(f"[HOLD] L:{left} R:{right} angle:{angle_cmd:.1f} spd:{MOTOR_SPEED:.0f}")
+            continue
+
+        # PID 오차(좌-우)
+        error = left - right
+        integral += error * dt
+        integral = max(-200.0, min(200.0, integral))
+        derivative = (error - prev_error) / dt
+        prev_error = error
+
+        output = Kp * error + Ki * integral + Kd * derivative
+        # 조향 계산 및 클램프
+        angle_cmd = max(45.0, min(135.0, base_angle - output))
+        # 속도는 조향 의존(안전한 단조형)
+        target_speed = speed_from_angle_safe(angle_cmd)
+        MOTOR_SPEED = slew(MOTOR_SPEED, target_speed, SPEED_SLEW)
+
+        # 출력 적용
+        set_servo_angle(round(angle_cmd, 0))
+        move_forward(MOTOR_SPEED)
+
+        # 모니터링
+        print(f"L:{left:.1f} R:{right:.1f} err:{error:.2f} ang:{angle_cmd:.1f} v:{MOTOR_SPEED:.0f}")
+
+        # 제어주기
+        time.sleep(0.0001)
 
 finally:
     motor_pwm.stop()
