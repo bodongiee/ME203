@@ -78,11 +78,17 @@ motor_pwm.start(0)
 servo_pwm.start(0)
 
 # ---------------- 서보/모터 제어 함수 ----------------
-def set_servo_angle(angle):
-    """서보 각도 설정 (45~135도)"""
+def set_servo_angle(angle, hold=True):
+    """서보 각도 설정 (45~135도)
+    hold=True: duty 유지 (라인 추적용)
+    hold=False: duty 0으로 (PID 주행용, 떨림 방지)
+    """
     angle = max(45, min(135, angle))
     duty = SERVO_MIN_DUTY + (angle - 45) * (SERVO_MAX_DUTY - SERVO_MIN_DUTY) / 90.0
     servo_pwm.ChangeDutyCycle(duty)
+    if not hold:
+        time.sleep(0.05)
+        servo_pwm.ChangeDutyCycle(0)
     return angle
 
 def set_motor(speed, direction="forward"):
@@ -340,9 +346,14 @@ try:
                 elapsed = time.time() - green_light_time
                 if elapsed >= 1.5:
                     print(f"\n✓ Forward complete. Switching to PID mode...")
-                    set_servo_angle(90)
+                    set_servo_angle(90, hold=True)
                     stop_motor()
                     time.sleep(0.5)
+
+                    # 카메라 정리
+                    print("[INFO] Stopping camera for PID mode...")
+                    picam2.stop()
+                    time.sleep(0.3)
 
                     # PID 모드로 전환 준비
                     prev_error = 0.0
@@ -391,7 +402,7 @@ try:
 
             # 응급 회피
             if left is not None and left <= EMERGENCY_CM:
-                set_servo_angle(120)
+                set_servo_angle(120, hold=False)
                 target_speed = SPEED_MIN
                 MOTOR_SPEED = slew(MOTOR_SPEED, target_speed, SPEED_SLEW)
                 set_motor(MOTOR_SPEED)
@@ -399,7 +410,7 @@ try:
                 continue
 
             if right is not None and right <= EMERGENCY_CM:
-                set_servo_angle(60)
+                set_servo_angle(60, hold=False)
                 target_speed = SPEED_MIN
                 MOTOR_SPEED = slew(MOTOR_SPEED, target_speed, SPEED_SLEW)
                 set_motor(MOTOR_SPEED)
@@ -412,7 +423,7 @@ try:
                 angle_cmd = base_angle
                 target_speed = speed_from_angle_safe(angle_cmd) * V_SAFE
                 MOTOR_SPEED = slew(MOTOR_SPEED, target_speed, SPEED_SLEW)
-                set_servo_angle(angle_cmd)
+                set_servo_angle(angle_cmd, hold=False)
                 set_motor(MOTOR_SPEED)
                 print(f"[LOST] L:{left} R:{right} angle:{angle_cmd:.1f} spd:{MOTOR_SPEED:.0f}")
                 continue
@@ -422,7 +433,7 @@ try:
                 angle_cmd = base_angle
                 target_speed = speed_from_angle_safe(angle_cmd) * 0.8
                 MOTOR_SPEED = slew(MOTOR_SPEED, target_speed, SPEED_SLEW)
-                set_servo_angle(angle_cmd)
+                set_servo_angle(angle_cmd, hold=False)
                 set_motor(MOTOR_SPEED)
                 print(f"[HOLD] L:{left} R:{right} angle:{angle_cmd:.1f} spd:{MOTOR_SPEED:.0f}")
                 continue
@@ -439,7 +450,7 @@ try:
             target_speed = speed_from_angle_safe(angle_cmd)
             MOTOR_SPEED = slew(MOTOR_SPEED, target_speed, SPEED_SLEW)
 
-            set_servo_angle(round(angle_cmd, 0))
+            set_servo_angle(round(angle_cmd, 0), hold=False)
             set_motor(MOTOR_SPEED)
 
             if frame_count % 10 == 0:
@@ -452,7 +463,7 @@ except KeyboardInterrupt:
 
 finally:
     # 정지
-    set_servo_angle(90)
+    set_servo_angle(90, hold=True)
     stop_motor()
     time.sleep(0.3)
 
@@ -460,8 +471,13 @@ finally:
     motor_pwm.stop()
     servo_pwm.stop()
     GPIO.cleanup()
-    if state != "PID_DRIVING":
-        picam2.stop()
+
+    # 카메라 정리 (PID 모드에서는 이미 종료됨)
+    try:
+        if state != "PID_DRIVING":
+            picam2.stop()
+    except:
+        pass
 
     # 통계
     total_time = time.time() - start_time

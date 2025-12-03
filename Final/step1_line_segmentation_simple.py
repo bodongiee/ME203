@@ -100,7 +100,6 @@ try:
         # 1. 프레임 캡처
         frame = picam2.capture_array()
 
-
         h, w = frame.shape[:2]
         y_color = (h - COLOR_SIZE) // 2
         x_color = (w - COLOR_SIZE) // 2
