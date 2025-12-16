@@ -8,8 +8,9 @@ from picamera2 import Picamera2
 
 
 IMG_SIZE = 160
-COLOR_SIZE = 160  
+COLOR_SIZE = 160
 MODEL_PATH = "./line_segmentation_light.tflite"
+COLOR_MODEL_PATH = "./color_light_160.tflite"
 
 # GPIO
 SERVO_PIN = 13
@@ -21,21 +22,10 @@ DIR_PIN = 16
 PWM_PIN = 12
 MOTOR_FREQ = 1000
 SPEED = 18
+ANGLE_SPEED_GAIN = 5  # 각도에 따른 속도 보정 최대값 (0 이상)
 
-# HSV 색상 범위 (실제 환경에 맞게 조정 필요)
-# Green: H=40~80 (초록색)
-GREEN_LOWER = np.array([40, 50, 50])
-GREEN_UPPER = np.array([80, 255, 255])
-
-# Red: H=0~10 또는 160~180 (빨간색은 HSV에서 두 구간)
-RED_LOWER1 = np.array([0, 50, 50])
-RED_UPPER1 = np.array([10, 255, 255])
-RED_LOWER2 = np.array([160, 50, 50])
-RED_UPPER2 = np.array([180, 255, 255])
-
-print("="*60)
-print("Step 1: 빨간불 정지 → 초록불 전진 (HSV 감지)")
-print("="*60)
+RED_ACCEPTANCE = 40
+GREEN_ACCEPTANCE = 50
 
 # ---------------- GPIO 초기화 ----------------
 GPIO.setmode(GPIO.BCM)
@@ -52,40 +42,54 @@ def set_servo_angle(angle):
     servo_pwm.ChangeDutyCycle(duty)
     return angle
 
+def angle_cor(servo_angle):
+    # 90도(직진)에서 0, 45도/135도(최대 회전)에서 최대 보정값
+    # 코너에서 마찰 보상을 위해 속도를 높임
+    angle_diff = abs(servo_angle - 90)  # 0~45
+    speed_correction = ANGLE_SPEED_GAIN * (angle_diff / 45.0)  # 0 ~ GAIN
+    return speed_correction
+
 def set_motor(speed, direction="forward"):
     if direction == "forward":
-        GPIO.output(DIR_PIN, GPIO.HIGH)  
+        GPIO.output(DIR_PIN, GPIO.HIGH)
     elif direction == "backward":
-        GPIO.output(DIR_PIN, GPIO.LOW)  
+        GPIO.output(DIR_PIN, GPIO.LOW)
     motor_pwm.ChangeDutyCycle(speed)
 
-def detect_color_hsv(rgb_image):
+def detect_color_classification(rgb_image, interpreter, input_details, output_details):
 
-    hsv = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2HSV)
-
-
-    green_mask = cv2.inRange(hsv, GREEN_LOWER, GREEN_UPPER)
-    green_pixels = np.sum(green_mask > 0)
-
-    red_mask1 = cv2.inRange(hsv, RED_LOWER1, RED_UPPER1)
-    red_mask2 = cv2.inRange(hsv, RED_LOWER2, RED_UPPER2)
-    red_mask = cv2.bitwise_or(red_mask1, red_mask2)
-    red_pixels = np.sum(red_mask > 0)
-
-    total_pixels = rgb_image.shape[0] * rgb_image.shape[1]
-    green_ratio = green_pixels / total_pixels
-    red_ratio = red_pixels / total_pixels
-
-    green_conf = min(green_ratio / 0.1, 1.0)
-    red_conf = min(red_ratio / 0.1, 1.0)
-
-    # 더 높은 쪽 반환
-    if green_conf > red_conf and green_conf > 0.3:
-        return "green", green_conf
-    elif red_conf > green_conf and red_conf > 0.3:
-        return "red", red_conf
+    if input_details['dtype'] == np.uint8:
+        input_data = rgb_image.astype(np.uint8)
     else:
-        return "none", 0.0
+        input_data = rgb_image.astype(np.float32) / 255.0
+
+    input_data = np.expand_dims(input_data, axis=0)
+
+    # 추론
+    interpreter.set_tensor(input_details['index'], input_data)
+    interpreter.invoke()
+    output_data = interpreter.get_tensor(output_details['index'])
+
+    # 출력 처리 (INT8 역양자화)
+    if output_details['dtype'] == np.uint8 or output_details['dtype'] == np.int8:
+        quant = output_details.get('quantization_parameters', {})
+        scale = quant.get('scales', [1.0])[0]
+        zero_point = quant.get('zero_points', [0])[0]
+        output_data = (output_data.astype(np.float32) - zero_point) * scale
+
+    # 소프트맥스 적용
+    exp_output = np.exp(output_data - np.max(output_data))
+    probabilities = exp_output / np.sum(exp_output)
+    probabilities = probabilities[0]
+
+    # 클래스 인덱스: 0=green, 1=red (모델 학습 순서에 따라 조정 필요)
+    class_idx = np.argmax(probabilities)
+    confidence = probabilities[class_idx]
+
+    class_names = ["green", "red"]
+    color_name = class_names[class_idx]
+
+    return color_name, confidence
 
 
 print("\n[INFO] Loading segmentation model...")
@@ -96,9 +100,15 @@ seg_input_details = seg_interpreter.get_input_details()[0]
 seg_output_details = seg_interpreter.get_output_details()[0]
 
 seg_is_int8 = (seg_input_details['dtype'] == np.uint8)
-print(f"✓ Segmentation model loaded (INT8: {seg_is_int8})")
 
-print("\n[INFO] Using HSV color detection (no model)")
+print("\n[INFO] Loading color classification model...")
+color_interpreter = tflite.Interpreter(model_path=COLOR_MODEL_PATH)
+color_interpreter.allocate_tensors()
+
+color_input_details = color_interpreter.get_input_details()[0]
+color_output_details = color_interpreter.get_output_details()[0]
+
+color_is_int8 = (color_input_details['dtype'] == np.uint8)
 
 # ---------------- 카메라 초기화 ----------------
 print("\n[INFO] Initializing camera...")
@@ -107,13 +117,15 @@ config = picam2.create_preview_configuration(main={"size": (640, 480), "format":
 picam2.configure(config)
 picam2.start()
 time.sleep(1)
-print("✓ Camera ready")
 
-# 초기 서보 중앙
+
 set_servo_angle(90)
-time.sleep(0.5)
 
-print("\n[START] Tracking line until RED light...")
+set_motor(20)
+time.sleep(0.5)
+set_motor(0)
+
+
 print("-"*60)
 
 state = "TRACKING"  # TRACKING, REVERSING, WAITING_GREEN, MOVING_FORWARD, DONE
@@ -128,14 +140,16 @@ try:
         # 1. 프레임 캡처
         frame = picam2.capture_array()
 
-        # 2-1. HSV 색상 감지용 전처리 (160x160 크롭)
+        # 2-1. 색상 분류용 전처리 (160x160 크롭)
         h, w = frame.shape[:2]
         y_color = (h - COLOR_SIZE) // 2
         x_color = (w - COLOR_SIZE) // 2
         color_cropped = frame[y_color:y_color+COLOR_SIZE, x_color:x_color+COLOR_SIZE]
 
-        # HSV 색상 감지
-        color_name, color_conf = detect_color_hsv(color_cropped)
+        # TFLite 모델로 색상 감지
+        color_name, color_conf = detect_color_classification(
+            color_cropped, color_interpreter, color_input_details, color_output_details
+        )
 
         # 2-2. 라인 감지용 전처리 (160x160 크롭)
         y_start = (h - IMG_SIZE) // 2
@@ -174,12 +188,9 @@ try:
         mask_binary[:, :border] = 0  # 좌측
         mask_binary[:, -border:] = 0  # 우측
 
-        # 6. 상태 머신
         if state == "TRACKING":
-            # 빨간불 감지 (신뢰도 > 50%)
-            if color_name == "red" and color_conf > 0.5:
-                print(f"\n RED LIGHT DETECTED! (conf={color_conf:.3f})")
-                print(f"Reversing...")
+            # 빨간불 감지
+            if color_name == "red" and color_conf > 1 - RED_ACCEPTANCE / 100:
                 set_servo_angle(90)
                 set_motor(SPEED, direction="backward")
                 reverse_start_time = time.time()
@@ -214,7 +225,6 @@ try:
         elif state == "REVERSING":
             elapsed = time.time() - reverse_start_time
             if elapsed >= 0.5:  # 0.5초 후진
-                print(f"\n✓ Reverse complete. Stopping...")
                 set_servo_angle(90)
                 set_motor(0)
                 state = "WAITING_GREEN"
@@ -223,15 +233,12 @@ try:
                 set_motor(SPEED, direction="backward")
 
         elif state == "WAITING_GREEN":
-
-            if color_name == "green" and color_conf > 0.5:
-                print(f"\n GREEN LIGHT DETECTED! Moving forward...")
-                set_servo_angle(90)
+            if color_name == "green" and color_conf > 1 - GREEN_ACCEPTANCE / 100:
+                set_servo_angle(80)
                 set_motor(SPEED)
                 green_light_time = time.time()
                 state = "MOVING_FORWARD"
             else:
-                # 정지 상태 유지
                 if frame_count % 10 == 0:
                     print(f"WAITING | Color={color_name}({color_conf:.2f})")
 
@@ -239,7 +246,6 @@ try:
             # 1초 전진
             elapsed = time.time() - green_light_time
             if elapsed >= 1.0:
-                print(f"\n✓ Forward complete. Mission 1 Done!")
                 set_servo_angle(90)
                 set_motor(0)
                 state = "DONE"
@@ -282,11 +288,8 @@ finally:
     print("="*60)
     print("[INFO] Cleanup complete")
 
-    # Mission 2 (PID 주행) 시작
+    # 2 (PID 주행) 시작
     if state == "DONE":
-        print("\n" + "="*60)
-        print("Starting Mission 2: PID Wall-Following...")
-        print("="*60)
-        time.sleep(1)
+        time.sleep(0.5)
         import subprocess
         subprocess.run(["python3", "../Ultrasonic_PID_driving/driving_edit.py"])
